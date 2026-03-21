@@ -10,5 +10,3 @@
 npm install
 
 npm start
-
-静的デプロイ用[https://github.com/ajgpw/youtube.git](https://github.com/ajgpw/youtube.git)
