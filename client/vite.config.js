@@ -1,3 +1,4 @@
+//これ要らんくね？
 import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
 import path from "path";
@@ -9,7 +10,7 @@ export default defineConfig({
       "@": path.resolve(__dirname, "src"),
     },
   },
-  base: "./", 
+  base: "/", 
   server: {
     allowedHosts: ["tpj4gl-5173.csb.app"],
     proxy: {

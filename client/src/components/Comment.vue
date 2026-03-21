@@ -1,9 +1,9 @@
 <template>
   <section class="comments-section">
-    <h2 v-if="totalCommentCount !== null">{{ totalCommentCount }}</h2>
+    <h2 v-if="totalCommentCount !== null" style="color: var(--text-primary); margin-block-start: 0px;">{{ totalCommentCount }}</h2>
 
     <!-- ローディング表示 -->
-    <p v-if="loading">コメントを読み込み中...</p>
+    <p v-if="loading" style="color: var(--text-primary);">コメントを読み込み中...</p>
 
     <!-- コメントリスト -->
     <ul v-else-if="comments.length > 0" class="comment-list">
@@ -49,14 +49,16 @@
       </li>
     </ul>
 
-    <p v-else-if="!error">コメントが見つかりません。</p>
-    <p v-if="error" class="error-msg">⚠️ {{ error }}<br />
+    <p v-else-if="!error" style="color: var(--text-primary);">コメントが見つかりません。ライブ配信の場合は取得できません</p>
+    <p v-if="error" class="error-msg" style="color: var(--accent-weak);">⚠️ {{ error }}<br />
       <button @click="fetchComments" class="retry-btn" type="button">再取得</button>
     </p>
   </section>
 </template>
 
 <script>
+import { apiRequest } from "@/services/requestManager";
+
 export default {
   name: "Comment",
   props: {
@@ -99,17 +101,16 @@ export default {
       this.loading = true;
 
       try {
-        const res = await fetch(`/api/comments/${this.videoId}`);
+        const data = await apiRequest({
+          params: { comments: this.videoId },
+          retries: 1,
+          timeout: 15000,
+          jsonpFallback: true,
+        });
 
-        if (!res.ok) {
-          throw new Error(`HTTP error! status: ${res.status}`);
-        }
+        this.totalCommentCount = data?.totalCommentCount ?? null;
 
-        const data = await res.json();
-
-        this.totalCommentCount = data.totalCommentCount ?? null;
-
-        if (Array.isArray(data.comments)) {
+        if (Array.isArray(data?.comments)) {
           this.comments = data.comments.map((c, index) => ({
             id: c.id || index,
             author: c.author || "匿名",
@@ -123,9 +124,10 @@ export default {
         } else {
           this.comments = [];
         }
-      } catch (err) {
-        console.error("コメント取得エラー:", err);
-        this.error = "コメントを読み込めませんでした。";
+      } catch (e) {
+        console.warn("fetchComments error:", e);
+        this.error = "コメントの取得に失敗しました";
+        this.comments = [];
       } finally {
         this.loading = false;
       }
@@ -175,9 +177,13 @@ export default {
 }
 
 .comments-section {
+  margin-block-end: 20px;
   padding: 16px;
   border-radius: 8px;
-  margin-top: -20px;
+  margin-top: -10px;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  transition: background-color 0.3s ease, color 0.3s ease;
 }
 
 .comment-list {
@@ -190,7 +196,7 @@ export default {
   display: flex;
   align-items: flex-start;
   padding: 8px 0;
-  border-bottom: 1px solid #dddddd71;
+  border-bottom: 1px solid var(--border-color);
 }
 
 .comment-author-icon {
@@ -206,6 +212,7 @@ export default {
 .comment-author {
   font-weight: bold;
   margin-bottom: 4px;
+  color: var(--text-primary);
 }
 
 .comment-text {
@@ -213,6 +220,7 @@ export default {
   white-space: pre-wrap;
   word-break: break-word;
   position: relative;
+  color: var(--text-primary);
 }
 
 .comment-text.clamped {
@@ -229,21 +237,23 @@ export default {
 .read-more-btn {
   background: none;
   border: none;
-  color: #007bff;
+  color: var(--accent-color);
   cursor: pointer;
   font-size: 0.9em;
   margin-top: 4px;
   padding: 0;
   user-select: none;
+  transition: color 0.2s ease;
 }
 
 .read-more-btn:hover {
   text-decoration: underline;
+  color: var(--accent-dark);
 }
 
 .comment-meta {
   font-size: 0.85em;
-  color: gray;
+  color: var(--text-secondary);
   display: flex;
   gap: 8px;
   align-items: center;
@@ -260,7 +270,7 @@ export default {
 }
 
 .error-msg {
-  color: red;
+  color: var(--accent-weak);
   margin-top: 12px;
 }
 </style>

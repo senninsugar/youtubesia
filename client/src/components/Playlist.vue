@@ -1,18 +1,24 @@
 <template>
-  <section v-if="error" class="error-message">
+  <section v-if="error" class="error-message" style="color: var(--text-primary);">
     プレイリストの取得に失敗しました。
   </section>
 
   <section v-else-if="playlist" class="playlist-section" :class="`type-${displayType}`">
     <template v-if="displayType !== 'channel'">
-      <h2 class="playlist-title">{{ playlist.title }}</h2>
-      <p class="playlist-meta">
+      <h2 class="playlist-title" style="color: var(--text-primary);">
+        {{ playlist.title }}
+      </h2>
+      <p class="playlist-meta" style="color: var(--text-primary);">
         動画本数: {{ playlist.totalItems }}
-        <span class="views" v-if="displayType !== 'watch'">｜再生数: {{ playlist.views }}回</span>
+        <span
+          class="views"
+          v-if="displayType !== 'watch' && playlist.views"
+        >
+          ｜ {{ playlist.views }}
+        </span>
       </p>
     </template>
 
-    <!-- スクロール対象コンテナに ref を追加 -->
     <div
       ref="scrollContainer"
       class="playlist-items-scroll"
@@ -25,35 +31,72 @@
         :class="{ active: item.videoId === playVideoId }"
         :data-video-id="item.videoId"
       >
-        <router-link :to="displayType !== 'channel' ? `/watch?v=${item.videoId}&list=${playlist.playlistId}` : `/watch?v=${item.videoId}`" class="video-link">
+        <router-link
+          :to="displayType !== 'channel'
+            ? `/watch?v=${item.videoId}&list=${playlist.playlistId}`
+            : `/watch?v=${item.videoId}`"
+          class="video-link"
+        >
+          <!-- watch レイアウト -->
           <div v-if="displayType === 'watch'" class="watch-layout">
             <div class="thumbnail-wrapper small-thumb">
               <img
                 :src="item.thumbnail || getPrimaryThumbnail(item.videoId)"
-                alt="動画サムネイル"
                 class="thumbnail"
                 @error="onImageError($event, item.videoId)"
               />
-              <span class="duration" v-if="item.duration">{{ item.duration }}</span>
+              <span class="duration" v-if="item.duration">
+                {{ item.duration }}
+              </span>
             </div>
+
             <div class="text-content">
-              <p class="title" :title="item.title">{{ item.title }}</p>
+              <p class="title">{{ item.title }}</p>
               <p class="author">{{ item.author }}</p>
+
+              <p class="meta-info" v-if="item.views || item.published">
+                <span v-if="item.views">
+                  <template v-if="isNumericOnly(item.views)">
+                    {{ item.views }}人が待機中
+                  </template>
+                  <template v-else>
+                    {{ item.views }}
+                  </template>
+                </span>
+                <span v-if="item.views && item.published"> • </span>
+                <span v-if="item.published">{{ item.published }}</span>
+              </p>
             </div>
           </div>
 
+          <!-- 通常レイアウト -->
           <div v-else>
             <div class="thumbnail-wrapper">
               <img
                 :src="item.thumbnail || getPrimaryThumbnail(item.videoId)"
-                alt="動画サムネイル"
                 class="thumbnail"
                 @error="onImageError($event, item.videoId)"
               />
-              <span class="duration" v-if="item.duration">{{ item.duration }}</span>
+              <span class="duration" v-if="item.duration">
+                {{ item.duration }}
+              </span>
             </div>
-            <p class="title" :title="item.title">{{ item.title }}</p>
+
+            <p class="title">{{ item.title }}</p>
             <p class="author">{{ item.author }}</p>
+
+            <p class="meta-info" v-if="item.views || item.published">
+              <span v-if="item.views">
+                <template v-if="isNumericOnly(item.views)">
+                  {{ item.views }}人が待機中
+                </template>
+                <template v-else>
+                  {{ item.views }}
+                </template>
+              </span>
+              <span v-if="item.views && item.published"> • </span>
+              <span v-if="item.published">{{ item.published }}</span>
+            </p>
           </div>
         </router-link>
       </div>
@@ -61,13 +104,14 @@
   </section>
 
   <section v-else>
-    <p>プレイリストを読み込み中...</p>
+    <p style="color: var(--text-primary);">プレイリストを読み込み中...</p>
   </section>
 </template>
 
 <script setup>
 import { ref, onMounted, nextTick, computed } from "vue";
 import { useRoute } from "vue-router";
+import { apiRequest } from "@/services/requestManager";
 
 const props = defineProps({
   playlistId: String,
@@ -83,13 +127,18 @@ const route = useRoute();
 const playlist = ref(null);
 const loading = ref(false);
 const error = ref(false);
-
-// スクロール対象の要素への参照
 const scrollContainer = ref(null);
 
 const playlistId = computed(() => props.playlistId || route.query.list || "");
-const playVideoId = computed(() => props.playVideoId || route.query.play || "");
+const playVideoId = computed(() => props.playVideoId || route.query.play || route.query.v || "");
 const displayType = computed(() => props.displayType || route.query.type || "default");
+
+function isNumericOnly(value) {
+  if (value === null || value === undefined) return false;
+  if (typeof value === "number") return true;
+  if (typeof value !== "string") return false;
+  return /^[0-9]+$/.test(value);
+}
 
 onMounted(async () => {
   if (!playlistId.value) {
@@ -99,42 +148,44 @@ onMounted(async () => {
   }
 
   loading.value = true;
-  error.value = false;
 
   try {
-    const res = await fetch(`/api/playlist/${playlistId.value}`);
-    if (!res.ok) throw new Error(`HTTPエラー: ${res.status}`);
-    playlist.value = await res.json();
-
-    console.log("取得プレイリスト:", playlist.value);
-    console.log("表示タイプ:", displayType.value);
-
-    if (displayType.value !== "watch" && displayType.value !== "channel" && playlist.value?.title) {
-      document.title = `${playlist.value.title} - プレイリスト`;
+    // If this is a local playlist (stored in localStorage), call apiRequest with
+    // `params.playlist` so requestManager's local-playlist shortcut runs.
+    let data;
+    if (playlistId.value && playlistId.value.startsWith("local-")) {
+      data = await apiRequest({
+        params: { playlist: playlistId.value },
+        retries: 1,
+        timeout: 30000,
+      });
+    } else {
+      const raw = route.query.v ? `playlist=${playlistId.value}==p==v==i==${route.query.v}` : `playlist=${playlistId.value}`;
+      data = await apiRequest({
+        params: { __rawQuery: raw },
+        retries: 1,
+        timeout: 30000,
+        jsonpFallback: true,
+      });
     }
 
+    playlist.value = data;
+
     await nextTick();
-
-    // 中央にスクロール
     if (playVideoId.value && scrollContainer.value) {
-      const containerEl = scrollContainer.value;
-      const target = containerEl.querySelector(`.playlist-item[data-video-id="${playVideoId.value}"]`);
-
+      const target = scrollContainer.value.querySelector(
+        `.playlist-item[data-video-id="${playVideoId.value}"]`
+      );
       if (target) {
-        const containerRect = containerEl.getBoundingClientRect();
-        const targetRect = target.getBoundingClientRect();
-
-        const relativeTop = targetRect.top - containerRect.top;
-        const scrollOffset =
-          containerEl.scrollTop + relativeTop - containerEl.clientHeight / 2 + target.clientHeight / 2;
-
-        containerEl.scrollTo({
-          top: scrollOffset,
+        scrollContainer.value.scrollTo({
+          top:
+            target.offsetTop -
+            scrollContainer.value.clientHeight / 2 +
+            target.clientHeight / 2,
           behavior: "smooth",
         });
       }
     }
-
   } catch (err) {
     console.error("プレイリスト取得失敗:", err);
     error.value = true;
@@ -157,18 +208,22 @@ function onImageError(event, id) {
 
 <style scoped>
 .playlist-item.active {
-  background-color: #DDEBE7F2;
+  background-color: var(--hover-bg);
+  transition: background-color 0.2s ease;
 }
 
 .playlist-section {
   max-width: 100%;
   margin: 0 auto;
   padding: 0.9rem;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  transition: background-color 0.3s ease, color 0.3s ease;
 }
 
 .type-watch {
   background-color: transparent;
-  border: 1px solid #ccc; 
+  border: 1px solid var(--border-color); 
   border-radius: 8px;
   padding: 0.9rem;
   max-width: 360px;
@@ -178,11 +233,12 @@ function onImageError(event, id) {
   font-size: 1.4rem;
   margin-bottom: 0.2rem;
   margin-block-start:0.3em;
+  color: var(--text-primary);
 }
 
 .playlist-meta {
   font-size: 0.9rem;
-  color: #666;
+  color: var(--text-secondary);
   margin-bottom: 1rem;
 }
 
@@ -198,7 +254,6 @@ function onImageError(event, id) {
 .scroll-watch {
   display: flex;
   flex-direction: column;
-  gap: 5px;
   overflow-y: auto;
   max-height: 420px;
   padding-right: 6px;
@@ -225,7 +280,8 @@ function onImageError(event, id) {
   aspect-ratio: 16 / 9;
   overflow: hidden;
   border-radius: 0.5rem;
-  margin-block: 10px; 
+  margin-block: 10px;
+  background-color: var(--bg-secondary);
 }
 
 .thumbnail-wrapper.small-thumb {
@@ -245,13 +301,14 @@ function onImageError(event, id) {
   bottom: 4px;
   right: 4px;
   font-size: 0.75rem;
-  color: #fff;
+  color: var(--on-accent);
   background-color: rgba(0, 0, 0, 0.7);
   padding: 2px 5px;
   border-radius: 4px;
 }
 
 .title {
+  margin-block-end: 3px;
   font-size: 0.9rem;
   font-weight: 600;
   text-align: left;
@@ -265,16 +322,30 @@ function onImageError(event, id) {
   text-overflow: ellipsis;
   white-space: normal;
   margin-left: 2px;
+  color: var(--text-primary);
 }
 
 .author {
+  margin-block-start: 3px;
+  margin-block-end: 3px;
   font-size: 0.8rem;
-  color: #666;
+  color: var(--text-secondary);
   text-align: left;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   margin-left: 2px;
+}
+
+.meta-info {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-left: 2px;
+  margin-top: 2px;
 }
 
 .watch-layout {
@@ -298,7 +369,7 @@ function onImageError(event, id) {
 }
 
 .error-message {
-  color: red;
+  color: var(--accent-weak);
   padding: 1rem;
   text-align: center;
 }

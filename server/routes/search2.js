@@ -13,15 +13,22 @@ const youtubeReady = Youtube.create()
     console.error("❌ Failed to initialize YouTube API:", err);
   });
 
-function generateThumbnails(videoId) {
+// サムネイルをBase64化して返す
+async function generateThumbnails(videoId) {
   if (!videoId) return {};
-  return {
-    default: { url: `https://i.ytimg.com/vi/${videoId}/default.jpg` },
-    medium:  { url: `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg` },
-    high:    { url: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg` },
-    standard:{ url: `https://i.ytimg.com/vi/${videoId}/sddefault.jpg` },
-    maxres:  { url: `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg` },
-  };
+  try {
+    const url = `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Failed to fetch thumbnail: ${res.status}`);
+    const buffer = await res.arrayBuffer();
+    const base64 = Buffer.from(buffer).toString("base64");
+    return {
+      medium: { url: `data:image/jpeg;base64,${base64}` }
+    };
+  } catch (err) {
+    console.error("❌ Thumbnail fetch error:", err);
+    return { medium: { url: "" } };
+  }
 }
 
 function normalizeViewCount(viewText) {
@@ -104,35 +111,35 @@ router.get("/", async (req, res) => {
       });
     }
 
-    const videos = (result.results || [])
-      .filter(item => ["Video", "Channel"].includes(item.type))
-      .map(item => {
-        if (item.type === "Video") {
-          const videoId = item.video_id || item.id;
-          return {
-            type: "video",
-            id: videoId,
-            title: item.title?.text || item.title?.runs?.[0]?.text || "無題",
-            duration: item.duration?.text || "不明",
-            publishedAt: formatPublishedAtJapanese(item.published?.text || ""),
-            channel: item.author?.name || "不明なチャンネル",
-            channelId: item.author?.id || "",
-            channelIcon: item.author?.thumbnails?.[0]?.url || "",
-            thumbnails: generateThumbnails(videoId),
-            viewCount: normalizeViewCount(item.view_count?.text || ""),
-            url: `https://www.youtube.com/watch?v=${videoId}`,
-          };
-        } else if (item.type = "Channel") {
-          return {
-            type: "channel",
-            id: item.channel_id || item.id,
-            name: item.author?.name || "不明なチャンネル",
-            icon: item.author?.thumbnails?.[0]?.url || "",
-            subscriberCount: item.video_count?.text || "不明",
-            url: `https://www.youtube.com/channel/${item.channel_id || item.id}`,
-          };
-        }
-      });
+    const videos = await Promise.all(
+      (result.results || [])
+        .filter(item => ["Video", "Channel"].includes(item.type))
+        .map(async item => {
+          if (item.type === "Video") {
+            const videoId = item.video_id || item.id;
+            return {
+              type: "video",
+              id: videoId,
+              title: item.title?.text || item.title?.runs?.[0]?.text || "無題",
+              duration: item.duration?.text || "不明",
+              publishedAt: formatPublishedAtJapanese(item.published?.text || ""),
+              channel: item.author?.name || "不明なチャンネル",
+              channelId: item.author?.id || "",
+              channelIcon: item.author?.thumbnails?.[0]?.url || "",
+              thumbnails: await generateThumbnails(videoId),
+              viewCount: normalizeViewCount(item.view_count?.text || ""),
+            };
+          } else if (item.type = "Channel") {
+            return {
+              type: "channel",
+              id: item.channel_id || item.id,
+              name: item.author?.name || "不明なチャンネル",
+              icon: item.author?.thumbnails?.[0]?.url || "",
+              subscriberCount: item.video_count?.text || "不明",
+            };
+          }
+        })
+    );
 
     res.json({
       results: videos,
@@ -145,3 +152,4 @@ router.get("/", async (req, res) => {
 });
 
 export default router;
+

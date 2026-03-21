@@ -1,153 +1,257 @@
-// 設定ファイル取得 + キャッシュ
-function fetchConfigJson(url) {
-  const now = Date.now();
-  const cacheEntry = configCacheMap.get(url);
+import express from "express";
+import https from "https";
+import fetch from "node-fetch";
+import { execFile } from "child_process";
+import { promisify } from "util";
 
-  if (cacheEntry && now - cacheEntry.timestamp < CACHE_DURATION_MS) {
-    return Promise.resolve(cacheEntry.data);
+const execFileAsync = promisify(execFile);
+const router = express.Router();
+
+const CONFIG_URL =
+  "https://raw.githubusercontent.com/siawaseok3/wakame/master/video_config.json";
+
+// ==================================================
+// 実行ファイルのパス定義（PATH非依存用）
+// ==================================================
+const YT_DLP_PATH = "./bin/yt-dlp" + (process.platform === "win32" ? ".exe" : "");
+
+// 共通 async エラーハンドラ
+const asyncHandler = (fn) => (req, res, next) =>
+  Promise.resolve(fn(req, res, next)).catch(next);
+
+function createError(name, message, status = 500) {
+  const err = new Error(message);
+  err.name = name;
+  err.status = status;
+  return err;
+}
+
+// YouTube ID バリデーション
+function validateYouTubeId(req, res, next) {
+  const { id } = req.params;
+  if (!/^[\w-]{11}$/.test(id)) {
+    return next(createError("ValidateYouTubeIdError", "YouTube ID が不正です", 400));
   }
+  next();
+}
 
+// 設定ファイル取得（キャッシュなし）
+function fetchConfigJson(url) {
   return new Promise((resolve, reject) => {
     https
       .get(url, (res) => {
         let data = "";
         if (res.statusCode !== 200) {
-          return reject(new Error(`ステータスコード: ${res.statusCode}`));
+          res.resume();
+          return reject(
+            createError("ConfigFetchError", `HTTP ${res.statusCode} エラー`)
+          );
         }
 
         res.on("data", (chunk) => (data += chunk));
         res.on("end", () => {
           try {
-            const json = JSON.parse(data);
-            configCacheMap.set(url, { data: json, timestamp: now });
-            resolve(json);
-          } catch (err) {
-            reject(new Error("JSONのパースに失敗しました"));
+            resolve(JSON.parse(data));
+          } catch {
+            reject(createError("ConfigParseError", "JSON パースに失敗"));
           }
         });
       })
-      .on("error", (err) => reject(err));
+      .on("error", () => reject(createError("ConfigFetchError", "リクエスト失敗")));
   });
 }
-import express from "express";
-import https from "https";
-import ytdl from "@distube/ytdl-core";
 
-const router = express.Router();
+// ==================================================
+// キャッシュ確認関数
+// ==================================================
+async function fetchCachedType2(id) {
+  try {
+    const cacheRes = await fetch("https://siawaseok.f5.si/api/cache");
+    if (!cacheRes.ok) return null;
 
-const CONFIG_URL =
-  "https://raw.githubusercontent.com/siawaseok3/wakame/master/video_config.json";
-const CACHE_DURATION_MS = 60 * 1000;
-
-const configCacheMap = new Map();
-
-function validateYouTubeId(req, res, next) {
-  const { id } = req.params;
-  if (!/^[\w-]{11}$/.test(id)) {
-    return res.status(400).json({
-      error: "不正なID形式です（11文字のYouTube Video IDが必要です）",
-    });
+    const cacheData = await cacheRes.json();
+    
+    // キャッシュ内に目当ての動画IDがある場合
+    if (cacheData[id]) {
+      console.log(`[Cache Hit] Video ID: ${id}`);
+      const type2Res = await fetch(`https://siawaseok.duckdns.org/api/stream/${id}/type2`);
+      
+      if (type2Res.ok) {
+        return await type2Res.json();
+      }
+    }
+  } catch (err) {
+    console.error(`[Cache Check Error] ${err.message}`);
   }
-  next();
+  return null;
 }
 
-
-// type1：embed URL を返す
-router.get("/:id", validateYouTubeId, async (req, res) => {
-  const { id } = req.params;
+// ==================================================
+// yt-dlp実行関数
+// ==================================================
+async function fetchVideoInfoViaYtDlp(id) {
+  console.log(`[yt-dlp] Fetching info for: ${id} using ${YT_DLP_PATH}`);
+  
+  const args = [
+    "--js-runtimes", "node",
+    "-J",
+    "--skip-download",
+    "--no-progress",
+    "--proxy", "http://ytproxy-siawaseok.duckdns.org:3007",
+    `https://www.youtube.com/watch?v=${id}`
+  ];
 
   try {
+    // PATHに依存せず、定義したローカルパスを実行
+    const { stdout } = await execFileAsync(YT_DLP_PATH, args, { maxBuffer: 10 * 1024 * 1024 });
+    return JSON.parse(stdout);
+  } catch (err) {
+    console.error("[yt-dlp Execution Error]", err);
+    throw createError("YtDlpExecutionError", "yt-dlpでの動画情報取得に失敗しました", 500);
+  }
+}
+
+// ==================================================
+// type1
+// ==================================================
+router.get(
+  "/:id",
+  validateYouTubeId,
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+
     const config = await fetchConfigJson(CONFIG_URL);
     const params = config.params || "";
-    const embedUrl = `https://www.youtubeeducation.com/embed/${id}${params}`;
-    res.json({ url: embedUrl });
-  } catch (err) {
-    console.error("設定ファイルの取得に失敗:", err.stack || err.message);
-    res.status(500).json({ error: "動画設定の取得に失敗しました。" });
-  }
-});
 
-// type2：外部APIへリクエストしてJSONをそのまま返す
-router.get("/:id/type2", validateYouTubeId, async (req, res) => {
-  const { id } = req.params;
-  const mainUrl = `https://siawaseok.duckdns.org/api/stream/${id}/type2`;
-  const fallbackUrl = `https://siatube.wjg.jp/api/stream/${id}/type2`;
+    res.json({ url: `https://www.youtubeeducation.com/embed/${id}${params}` });
+  })
+);
 
-  try {
-    const response = await fetch(mainUrl);
-    if (!response.ok) throw new Error("main server error");
-    const json = await response.json();
-    return res.json(json);
-  } catch (err) {
-    console.error("type2: main server failed, fallbackへ", err.message);
-    try {
-      const response = await fetch(fallbackUrl);
-      if (!response.ok) throw new Error("fallback server error");
-      const json = await response.json();
-      return res.json(json);
-    } catch (err2) {
-      console.error("type2: fallbackも失敗", err2.message);
-      return res.status(500).json({ error: "type2: 両方のサーバーで取得失敗" });
+// ==================================================
+// Type2
+// ==================================================
+router.get(
+  "/:id/type2",
+  validateYouTubeId,
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+
+    // 1. キャッシュの確認
+    const cachedData = await fetchCachedType2(id);
+    if (cachedData) {
+      // キャッシュが存在する場合はそのレスポンスをそのまま返す
+      return res.json(cachedData);
     }
-  }
-});
 
-// type3：外部APIへリクエストしてJSONをそのまま返す
-router.get("/:id/type3", validateYouTubeId, async (req, res) => {
-  const { id } = req.params;
-  const mainUrl = `https://siawaseok.duckdns.org/api/stream/download/${id}`;
-  const fallbackUrl = `https://siatube.wjg.jp/api/stream/download/${id}`;
+    // 2. キャッシュがない場合は yt-dlp を実行
+    const data = await fetchVideoInfoViaYtDlp(id);
 
-  try {
-    const response = await fetch(mainUrl);
-    if (!response.ok) throw new Error("main server error");
-    const json = await response.json();
-    return res.json(json);
-  } catch (err) {
-    console.error("type3: main server failed, fallbackへ", err.message);
-    try {
-      const response = await fetch(fallbackUrl);
-      if (!response.ok) throw new Error("fallback server error");
-      const json = await response.json();
-      return res.json(json);
-    } catch (err2) {
-      console.error("type3: fallbackも失敗", err2.message);
-      return res.status(500).json({ error: "type3: 両方のサーバーで取得失敗" });
-    }
-  }
-});
-// キャッシュ削除
-router.post("/admin/invalidate-cache", express.json(), (req, res) => {
-  const { url } = req.body;
-  if (!url || typeof url !== "string") {
-    return res.status(400).json({ error: "無効なURLです" });
-  }
+    // 3. 後の処理（整形）
+    const formats = Array.isArray(data.formats) ? data.formats : [];
+    const processedFormats = formats.map((f) => {
+      const hasVideo = f.vcodec && f.vcodec !== "none";
+      const hasAudio = f.acodec && f.acodec !== "none";
 
-  const existed = configCacheMap.delete(url);
-  if (existed) {
-    res.json({ message: "キャッシュを削除しました", url });
-  } else {
-    res.json({ message: "キャッシュは存在しませんでした", url });
-  }
-});
+      let streamType = "unknown";
 
-// キャッシュ状況確認
-router.get("/admin/cache-status", (req, res) => {
-  const now = Date.now();
-  const status = [];
+      if (hasVideo && hasAudio) streamType = "both";
+      else if (hasVideo) streamType = "video only";
+      else if (hasAudio) streamType = "audio only";
 
-  for (const [url, { timestamp }] of configCacheMap.entries()) {
-    status.push({
-      url,
-      ageSeconds: Math.floor((now - timestamp) / 1000),
-      expiresInSeconds: Math.max(
-        0,
-        Math.ceil((CACHE_DURATION_MS - (now - timestamp)) / 1000)
-      ),
+      return {
+        ...f,
+        hasVideo,
+        hasAudio,
+        streamType,
+        isM3u8: typeof f.url === "string" && f.url.includes(".m3u8"),
+      };
     });
-  }
 
-  res.json({ cache: status });
+    console.log(`[Type2] Formats processed: ${processedFormats.length}`);
+
+    res.json({
+      ...data,
+      formats: processedFormats,
+    });
+  })
+);
+
+// ==================================================
+// ダウンロード用
+// ==================================================
+router.get(
+  "/download/:id",
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+
+    // 1. キャッシュの確認
+    const cachedData = await fetchCachedType2(id);
+    if (cachedData) {
+      // キャッシュが存在する場合はそのまま返す
+      return res.json(cachedData);
+    }
+
+    // 2. キャッシュがない場合は yt-dlp を実行
+    const data = await fetchVideoInfoViaYtDlp(id);
+
+    if (!data.formats || !Array.isArray(data.formats)) {
+      throw createError("FormatDataError", "formats が欠損しています");
+    }
+
+    // 3. 後の処理（整形）
+    const result = {
+      "audio only": [],
+      "video only": [],
+      "audio&video": [],
+      "m3u8 raw": [],
+      "m3u8 proxy": [],
+    };
+
+    for (const f of data.formats) {
+      if (!f.url) continue;
+
+      const url = f.url.toLowerCase();
+
+      if (url.includes("lang=") && !url.includes("lang=ja")) continue;
+
+      if (url.endsWith(".m3u8")) {
+        const m3u8Data = {
+          url: f.url,
+          resolution: f.resolution,
+          vcodec: f.vcodec,
+          acodec: f.acodec,
+        };
+        result["m3u8 raw"].push(m3u8Data);
+        result["m3u8 proxy"].push({
+          ...m3u8Data,
+          url: `https://proxy-siawaseok.duckdns.org/proxy/m3u8?url=${encodeURIComponent(f.url)}`,
+        });
+        continue;
+      }
+
+      if (f.resolution === "audio only" || f.vcodec === "none") {
+        result["audio only"].push(f);
+      } else if (f.acodec === "none") {
+        result["video only"].push(f);
+      } else {
+        result["audio&video"].push(f);
+      }
+    }
+
+    res.json(result);
+  })
+);
+
+// ==================================================
+// 共通エラーハンドラ
+// ==================================================
+router.use((err, req, res, next) => {
+  console.error("🔥 Error:", err.name, err.message);
+
+  res.status(err.status || 500).json({
+    error: err.name,
+    message: err.message,
+  });
 });
 
 export default router;

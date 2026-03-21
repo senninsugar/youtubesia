@@ -18,9 +18,33 @@ let youtube;
   }
 })();
 
-// プレイリストIDを正規化（長すぎる場合は先頭2文字を削除）
+// プレイリストIDを正規化
 function normalizePlaylistId(id = "") {
   return id.length > 34 ? id.slice(2) : id;
+}
+
+// 指定された形式のURLから画像をBase64化するヘルパー関数
+// quality引数で 'mqdefault' か 'default' を切り替え可能にします
+async function fetchImageAsBase64(videoId, quality = 'mqdefault') {
+  if (!videoId) return "";
+  
+  // 指定されたURL形式 (qualityを変数化)
+  const url = `https://i.ytimg.com/vi_webp/${videoId}/${quality}.webp`;
+
+  try {
+    const response = await fetch(url);
+    
+    if (!response.ok) {
+      return "";
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    return `data:image/webp;base64,${buffer.toString("base64")}`;
+  } catch (err) {
+    console.error(`画像取得エラー [${videoId} (${quality})]:`, err.message);
+    return "";
+  }
 }
 
 // GET /api/channel/:id
@@ -38,39 +62,57 @@ router.get("/:id", async (req, res) => {
     const header = channel.header ?? {};
     const currentTab = channel.current_tab ?? {};
     const contents = currentTab?.content?.contents ?? [];
-    const topVideo = contents?.[0]?.contents?.[0] ?? {};
+    
+    // TopVideoオブジェクトの抽出
+    const topVideoRaw = contents?.[0]?.contents?.[0] ?? {};
+    const topVideoId = topVideoRaw.id ?? topVideoRaw.video_id ?? "";
 
-    // プレイリストセクションを抽出（除外）
+    // プレイリストセクションを抽出
     const playlistSections = contents.slice(1).filter(c => {
       if (c.type !== "ItemSection") return false;
       const title = c?.contents?.[0]?.title?.text ?? "";
       return title !== "メンバー" && title !== "投稿" && title !== "ショート" && title !== "複数の再生リスト";
     });
 
-    // プレイリスト情報をマップ
-    const playlists = playlistSections.map(section => {
-      const content = section?.contents?.[0];
-      const items = content?.content?.items ?? [];
-      const rawPlaylistId = content?.title?.endpoint?.payload?.browseId ?? "";
-      const playlistId = normalizePlaylistId(rawPlaylistId);
+    // --- 並列処理の開始 ---
+    const [topVideoThumbnail, playlists] = await Promise.all([
+      // 1. TopVideo: mqdefault.webp を取得
+      fetchImageAsBase64(topVideoId, 'mqdefault'),
 
-      return {
-        title: content?.title?.text ?? "",
-        playlistId,
-        items: items.map(item => ({
-          videoId: item.video_id ?? item.author?.id ?? "",
-          title: item.title?.text ?? item.author?.name ?? "",
-          duration: item.duration?.text ?? "",
-          published: item.published?.text ?? "",
-          author: item.author?.name ?? metadata.title ?? "",
-          viewCount: item.short_view_count?.text ?? item.views?.text ?? item.subscribers?.text ?? "",
-          thumbnail: item.thumbnail?.[0]?.url ?? "",
-          icon: item.author?.thumbnails?.[0]?.url ?? "",
-        }))
-      };
-    });
+      // 2. プレイリスト内の動画: default.webp を取得
+      Promise.all(playlistSections.map(async (section) => {
+        const content = section?.contents?.[0];
+        const itemsRaw = content?.content?.items ?? [];
+        const rawPlaylistId = content?.title?.endpoint?.payload?.browseId ?? "";
+        const playlistId = normalizePlaylistId(rawPlaylistId);
 
-    // "UCxxxx" → "UUxxxx" に変換（アップロード用プレイリストID）
+        const items = await Promise.all(itemsRaw.map(async (item) => {
+          const videoId = item.video_id ?? item.author?.id ?? "";
+          
+          // ここで 'default' を指定して軽量な画像を取得
+          const thumbnailBase64 = await fetchImageAsBase64(videoId, 'default');
+
+          return {
+            videoId: videoId,
+            title: item.title?.text ?? item.author?.name ?? "",
+            duration: item.duration?.text ?? "",
+            published: item.published?.text ?? "",
+            author: item.author?.name ?? metadata.title ?? "",
+            viewCount: item.short_view_count?.text ?? item.views?.text ?? item.subscribers?.text ?? "",
+            thumbnail: thumbnailBase64,
+            icon: item.author?.thumbnails?.[0]?.url ?? "",
+          };
+        }));
+
+        return {
+          title: content?.title?.text ?? "",
+          playlistId,
+          items: items
+        };
+      }))
+    ]);
+
+    // "UCxxxx" → "UUxxxx" に変換
     let uploadsPlaylistId = "";
     if (channelId.startsWith("UC")) {
       uploadsPlaylistId = "UU" + channelId.slice(2);
@@ -84,13 +126,14 @@ router.get("/:id", async (req, res) => {
       videoCount: header.content?.metadata?.metadata_rows?.[1]?.metadata_parts?.[0]?.text?.text ?? "",
       description: metadata.description ?? "",
       topVideo: {
-        title: topVideo.title?.text ?? "",
-        videoId: topVideo.id ?? topVideo.video_id ?? "",
-        viewCount: topVideo.view_count?.text ?? "",
-        published: topVideo.published_time?.text ?? "",
-        description: (topVideo.description?.text ?? "").replace(/\n/g, "<br>"),
+        title: topVideoRaw.title?.text ?? "",
+        videoId: topVideoId,
+        viewCount: topVideoRaw.view_count?.text ?? "",
+        published: topVideoRaw.published_time?.text ?? "",
+        description: (topVideoRaw.description?.text ?? "").replace(/\n/g, "<br>"),
+        thumbnail: topVideoThumbnail, // mqdefaultのBase64画像
       },
-      playlists,
+      playlists, // defaultのBase64画像を含むリスト
       uploadsPlaylistId,
     };
 

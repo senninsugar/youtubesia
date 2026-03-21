@@ -10,6 +10,7 @@ let youtube;
     lang: "ja",
     location: "JP",
     retrieve_player: true,
+    debug: false,
   });
 })();
 
