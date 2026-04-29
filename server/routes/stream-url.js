@@ -209,6 +209,51 @@ router.get(
   })
 );
 
+// ==================================================
+// 新規追加: JSONファイルをダウンロードさせるルート
+// ==================================================
+router.get(
+  "/export-json/:id",
+  validateYouTubeId,
+  asyncHandler(async (req, res) => {
+    const { id } = req.params;
+
+    // 既存の取得・整形ロジックを再利用してデータを準備
+    let finalData;
+    const cachedData = await fetchCachedType2(id);
+    
+    if (cachedData) {
+      finalData = cachedData;
+    } else {
+      const data = await fetchVideoInfoViaYtDlp(id);
+      const formats = Array.isArray(data.formats) ? data.formats : [];
+      const processedFormats = formats.map((f) => {
+        const hasVideo = f.vcodec && f.vcodec !== "none";
+        const hasAudio = f.acodec && f.acodec !== "none";
+        let streamType = "unknown";
+        if (hasVideo && hasAudio) streamType = "both";
+        else if (hasVideo) streamType = "video only";
+        else if (hasAudio) streamType = "audio only";
+
+        return {
+          ...f,
+          hasVideo,
+          hasAudio,
+          streamType,
+          isM3u8: typeof f.url === "string" && f.url.includes(".m3u8"),
+        };
+      });
+      finalData = { ...data, formats: processedFormats };
+    }
+
+    // JSONとしてブラウザにダウンロードさせるためのヘッダー設定
+    const fileName = `video_info_${id}.json`;
+    res.setHeader("Content-Disposition", `attachment; filename=${fileName}`);
+    res.setHeader("Content-Type", "application/json");
+    res.send(JSON.stringify(finalData, null, 2));
+  })
+);
+
 router.use((err, req, res, next) => {
   console.error("🔥 Error:", err.name, err.message);
   res.status(err.status || 500).json({
